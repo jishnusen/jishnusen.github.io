@@ -1,0 +1,278 @@
+<html lang="en">
+<head>
+<title>(Python) DBUS Exploreations</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<h1>(Python) DBUS Explorations</h1>
+
+<h2>why...</h2>
+<p>
+I was faced with what should be a simple task&mdash running a script before and
+after a machine goes to sleep. Why? Not every laptop's power management is
+created equal, and often things need to be shut down explicitly, like bluetooth.
+SystemD provides a relatively simple way to do this, in the form of the
+<code>sleep</code> target. Scripts that run depending on this target can be
+placed in <code>/lib/systemd/system-sleep/</code>.
+</p>
+
+<p>
+For example, to forcibly shut off bluetooth on suspend, and turn it back on
+during resume, one could create the following script:
+</p>
+<pre>
+#!/bin/sh
+
+PATH=/usr/bin
+case "$1" in
+  pre)
+    rfkill block bluetooth
+    ;;
+  post)
+    rfkill unblock bluetooth
+    ;;
+esac
+exit 0
+</pre>
+
+<p>
+Now, if you're doing this for practical reasons stop here, since this is the
+recommended method for user-defined hacks. The warning message in the manpage is
+pretty scary:
+</p>
+<pre>
+Note that scripts or binaries dropped in /usr/lib/systemd/system-sleep/ are
+intended for local use only and should be considered hacks. If applications want
+to react to system suspend/hibernation and resume, they should rather use the
+Inhibitor interface.
+</pre>
+
+<p>
+But the script in the example, and similar ones, are examples of these local
+uses, so they are probably what you should be doing. However, seeing this
+warning message evokes the natural curiosity: what exactly is the inhibitor
+interface, and how can I use it? (Overengineering is fun)
+</p>
+
+<h2>inhibitors</h2>
+<p>
+For the curious, the complete documentation for the inhibitor interface can be
+found <a
+  href=https://www.freedesktop.org/wiki/Software/systemd/inhibit/>here</a>.
+The documentation provides a handy bit of pseudo-code, that does pretty much
+what we want to accomplish. It runs a function before the computer goes to
+sleep, and then runs another function when the computer wakes up. I've copied it
+here for your convenience:
+</p>
+<pre>
+int fd = -1;
+
+takeLock() {
+        if (fd >= 0)
+                return;
+
+        fd = Inhibit("sleep", "Word Processor", "Save any unsaved data in time...", "delay");
+}
+
+onDocumentOpen(void) {
+        takeLock();
+}
+
+onPrepareForSleep(bool b) {
+        if (b) {
+                saveData();
+                if (fd >= 0) {
+                        close(fd);
+                        fd = -1;
+                }
+         } else
+                takeLock();
+
+}
+</pre>
+
+<p>
+Although the pseudo-code is nice, we have to implement it of course! DBus is
+pretty complicated; but the parts we need to understand for this exercise can be
+distilled down pretty simply.
+</p>
+
+<h2>what's dbus</h2>
+<p>
+The so-called "hacky" solution I presented at the
+start of this uses "SystemD", an init system and framework present on most linux
+distributions. As an init system, SystemD owns all the processes running on
+the computer, so it is only natural for it to be the one to initiate suspending
+and resuming the computer. SystemD is tightly integrated with a message bus
+called "DBus". Most of the behaviors of SystemD are dependent on messages in
+DBus, and many SystemD services emit their own messages. Before we go on, let's
+set some DBus terminology straight:
+
+<ul>
+  <li>Object: an arbitrary object in memory that DBus is somewhat aware of</li>
+  <li>Object Path: a string that looks like a filesystem path that provides
+    bindings to these objects. Think of this like a "process ID" to identify the
+    instance of the object.</li>
+  <li>Interface: each object has a set of interfaces. This is the canonical OOP
+    object, which comes with its equivalent of methods and variables (messages).
+  <li>Method: methods of a DBus object that can be called via their
+    corresponding path</li>
+  <li>Signal: messages emitted by a DBus object. Each "Signal" is a single
+    message</li>
+</ul>
+</p>
+
+<h2>the sleep dbus object</h2>
+<p>
+Perusing over the inhibitor interface reveals that the <code>Inhibit</code>
+function that we see in the example are part of a set of interfaces in the
+<code>org.freedesktop.login1</code> object, at the
+<code>/org/freedesktop/login1</code> path.
+Finally, these are part of the <code>org.freedesktop.login1.Manager</code>
+interface. This is presented in the docs pretty clearly, and they include a full
+dump of the object looks like this (I trimmed a lot out, reference the linked
+documentation if you want to see mroe of the object, or just run the command
+yourself),
+</p>
+<pre>
+$ gdbus introspect --system --dest org.freedesktop.login1 --object-path /org/freedesktop/login1
+node /org/freedesktop/login1 {
+  interface org.freedesktop.login1.Manager {
+    methods:
+      Inhibit(in  s what,
+              in  s who,
+              in  s why,
+              in  s mode,
+              out h fd);
+      ...
+    signals:
+      PrepareForSleep(b active);
+      ...
+  };
+  ...
+};
+</pre>
+<p>
+From the previous section, you probably recognize the object path, as well as
+interfaces, methods, and signals in this output. Now, we have the tools to
+leverage any dbus library in a language that understands these semantics.
+</p>
+
+<h2>implementation</h2>
+<h3>Inhibit</h3>
+<p>
+The docs state that the <code>Inhibit</code> method returns a file descriptor
+that corresponds to the inhibition. Once this file descriptor is closed by the
+owning process, SystemD will allow the computer to sleep. To use it, let's use
+the <a href=https://pypi.org/project/dbus-python/><code>dbus-python</code></a>
+python library. First, we need to get the bus object, and then take its
+<code>Manager</code> interface, which we do like so:
+</p>
+
+<pre>
+object = dbus.SystemBus().get_object("org.freedesktop.login1", "/org/freedesktop/login1")
+interface = dbus.Interface(object, "org.freedesktop.login1.Manager")
+</pre>
+
+<p>
+Pretty nice! The library is a very semantically accurate interpretation of the
+DBus spec, and everything is named just as we would think. Now, all that remains
+is to call the actual <code>Inhibit</code> method, which we can do as if it is a
+python object:
+</p>
+
+<pre>
+fd = interface.Inhibit("sleep", ...).take()
+</pre>
+
+<p>
+Note that <code>dbus-python</code> wraps file descriptors like the one returned by
+<code>Inhibit</code> in a <code>UnixFd</code> object, which is an abstraction over
+actual file descriptor number to prevent things like leaking file descriptors or
+other issues. To actually open the file descriptor ourselves, we need to call
+the <code>take()</code> method ourselves. I've done this on the same line to
+prevent passing around an unopened file descriptor which is effectively
+meaningless.
+</p>
+
+<h3>PrepareForSleep</h3>
+<p>
+At this point, we're inhibiting sleep. But, since our goal is just running a
+script before sleeping, we ened to release our inhibition. To do so, we listen
+for the PrepareForSleep signal. As we learned earlier, DBus signals are emitted
+often by SystemD targets/services, and in this case, the PrepareForSleep method
+is emmitted once the user requests the computer to sleep. Somewhat
+unintuitively, it is also emitted on wakeup. That's why the message contains the
+field <code>b active</code>. The <code>b</code> here is a particularly terse
+notation of the boolean type. To listen for this signal, we can once again
+leverage <code>dbus-python</code>:
+</p>
+
+<pre>
+dbus.SystemBus().add_signal_receiver(lambda active: if active: os.close(fd) else ...,
+                                     signal_name="PrepareForSleep",
+                                     dbus_interface="org.freedesktop.login1.Manager")
+</pre>
+
+<p>
+The parameters are pretty obvious here&mdash we listen for the
+<code>PrepareForSleep</code> signal on our interface. The first argument is a
+function that is called with the messages properties as arguments. In our case,
+it's the <code>b active</code> parameter. So, if <code>active</code> is true,
+the computer wants to go to sleep, so we close the inhibitor. Of course, you'll
+want to actually run the script here. And otherwise, you'll want to grab the
+inihibitor again! A more complete handler might look like this:
+</p>
+
+<pre>
+def handle_sleep(active):
+  if active:
+    os.system("rfkill block bluetooth")
+    os.close(fd)
+    fd = -1
+  elif not fd > 0:
+    fd = interface.Inhibit("sleep", ...).take()
+</pre>
+
+<h3>complete</h3>
+<p>
+For all of this to actually work, we need to set up a DBus object in order to
+receive signals. This part is pretty simple, and we use <code>dbus-python</code>
+once more, combined with another library <a
+  href=https://pypi.org/project/PyGObject/><code>PyGObject</code></a> That
+provides bindings to make a GObject, which is a pretty simple DBus object. In
+our case, we use it like so:
+</p>
+
+<pre>
+from gi.repository import GLib
+from dbus.mainloop.glib import DBusGMainLoop
+
+# Set the main loop
+DBusGMainLoop(set_as_default=True)
+# Setup the listener here _after_ the library is aware of the object
+dbus.SystemBus().add_signal_receiver(...)
+# Start the object
+loop = GLib.MainLoop()
+loop.run()
+</pre>
+
+<p>
+Note that once we call <code>loop.run()</code>, our python program has
+transformed into a DBus object listening to the PrepareForSleep signal. In other
+words, the function is blocking!
+</p>
+
+<h2>conclusion</h2>
+<p>
+DBus is pretty powerful. In this example, we see how it can be used to transform
+programs into a live ABI. In this case, one might imagine the
+<code>login1</code> DBus object to be a part of the system ABI, with the Inhibit syscall
+provided. These are tightly integrated with a publisher/subscriber messaging
+model in the form of signals. By integrating objects themselves with the
+messaging platform a lot of powerful patterns emerge, that make DBus much
+preferable to basic Unix sockets in many cases. Of course, with this
+powerfulness comes great complexity, and this post only scratches the surface of
+what's possible with DBus.
+</p>
+</body>
