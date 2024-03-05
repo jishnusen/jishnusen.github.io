@@ -8,7 +8,7 @@
 
 <h2>why...</h2>
 <p>
-I was faced with what should be a simple task&mdash running a script before and
+I was faced with what should be a simple task&mdash; running a script before and
 after a machine goes to sleep. Why? Not every laptop's power management is
 created equal, and often things need to be shut down explicitly, like bluetooth.
 SystemD provides a relatively simple way to do this, in the form of the
@@ -215,7 +215,7 @@ dbus.SystemBus().add_signal_receiver(lambda active: if active: os.close(fd) else
 </pre>
 
 <p>
-The parameters are pretty obvious here&mdash we listen for the
+The parameters are pretty obvious here&mdash; we listen for the
 <code>PrepareForSleep</code> signal on our interface. The first argument is a
 function that is called with the messages properties as arguments. In our case,
 it's the <code>b active</code> parameter. So, if <code>active</code> is true,
