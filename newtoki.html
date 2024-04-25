@@ -1,0 +1,8 @@
+<head>
+  <script>
+    fetch('https://stevenyomi.github.io/source-domains/newtoki.txt')
+      .then(response => response.text())
+      .then(data => window.location.replace(`http://newtoki${data}.com`))
+      .catch(error => console.error(error));
+  </script>
+</head>
