@@ -2,10 +2,10 @@
   <script>
     fetch('https://stevenyomi.github.io/source-domains/newtoki.txt')
       .then(response => response.text())
-      .then(data => window.location.href = `http://newtoki${data}.com`)
+      .then(data => document.getElementById('newtoki').href = `http://newtoki${data}.com`)
       .catch(error => console.error(error));
   </script>
 </head>
 <html>
-  redirecting...
+  click <a id='newtoki'>here</a>
 </html>
